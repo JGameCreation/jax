@@ -26,6 +26,7 @@ from jax import lax
 
 from jax._src import ad_util
 from jax._src import api
+from jax._src import core
 from jax._src import dispatch
 from jax._src import dtypes
 from jax._src.core import (
@@ -1225,14 +1226,50 @@ def _lu_batching_rule(batched_args, batch_dims):
   x = batching.moveaxis(x, bd, 0)
   return lu_p.bind(x), (0, 0, 0)
 
-def _lu_cpu_gpu_lowering(getrf_impl, ctx, operand):
-  if any(not is_constant_shape(a.shape) for a in (ctx.avals_in + ctx.avals_out)):
-    raise NotImplementedError("Shape polymorphism for custom call is not implemented (lu); b/261671778")
+def _lu_cpu_gpu_lowering(getrf_impl, ctx, operand, *,
+                         platform: str):
   operand_aval, = ctx.avals_in
+  # TODO(necula): remove the platform kwarg when we implement GPU support.
+  if platform in ["cuda", "rocm"] and not is_constant_shape(operand_aval.shape):
+    raise NotImplementedError(
+        "Shape polymorphism for native lowering for lu on GPU is not "
+        "implemented; b/261671778")
+
+  # It should be possible to support fully-dynamic shapes, but since
+  # the last two dimensions (m, n) are used in more involved ways, we only
+  # support dynamic dimensions for the batch size for now.
+  if not is_constant_shape(operand_aval.shape[-2:]):
+    raise NotImplementedError(
+      "Shape polymorphism for native lowering for lu on CPU and GPU is "
+      f"implemented only for the batch dimensions: {operand_aval.shape}")
+
   out_aval, pivot_aval, perm_aval = ctx.avals_out
   batch_dims = operand_aval.shape[:-2]
-  m = operand_aval.shape[-2]
-  lu, pivot, info = getrf_impl(operand_aval.dtype, operand)
+  m, n = operand_aval.shape[-2:]
+  if platform in ["cuda", "rocm"] or jaxlib_version < (0, 4, 13):
+    lu, pivot, info = getrf_impl(operand_aval.dtype, operand)
+  else:
+    lu_shape = mlir.shape_tensor(mlir.eval_dynamic_shape(ctx, operand_aval.shape))
+    pivot_aval = core.ShapedArray(batch_dims + (min(m, n),), np.int32)
+    pivot_shape = mlir.shape_tensor(
+        mlir.eval_dynamic_shape(ctx, pivot_aval.shape))
+    info_aval = core.ShapedArray(batch_dims, np.int32)
+    info_shape = mlir.shape_tensor(mlir.eval_dynamic_shape(ctx, info_aval.shape))
+    batch_size, m_val, n_val = mlir.eval_dynamic_shape(
+        ctx, [math.prod(batch_dims), m, n])
+    if isinstance(batch_size, int):
+      batch_size = mlir.ir_constant(np.int32(batch_size))
+    if isinstance(m_val, int):
+      m_val = mlir.ir_constant(np.int32(m_val))
+    if isinstance(n_val, int):
+      n_val = mlir.ir_constant(np.int32(n_val))
+    lu, pivot, info = getrf_impl(
+        operand_aval.dtype, operand,
+        batch_size=batch_size, m=m_val, n=n_val,
+        result_types=[operand.type,
+                      mlir.aval_to_ir_type(pivot_aval),
+                      mlir.aval_to_ir_type(info_aval)],
+        result_shapes=[lu_shape, pivot_shape, info_shape])
   # Subtract 1 from the pivot to get 0-based indices.
   pivot = hlo.SubtractOp(pivot, mlir.full_like_aval(ctx, 1, pivot_aval)).result
   ok = mlir.compare_hlo(
@@ -1280,14 +1317,17 @@ ad.primitive_jvps[lu_p] = _lu_jvp_rule
 batching.primitive_batchers[lu_p] = _lu_batching_rule
 
 mlir.register_lowering(lu_p,
-                        partial(_lu_cpu_gpu_lowering, lapack.getrf_hlo),
+                        partial(_lu_cpu_gpu_lowering, lapack.getrf_hlo,
+                                platform='cpu'),
                         platform='cpu')
 
 mlir.register_lowering(
-    lu_p, partial(_lu_cpu_gpu_lowering, gpu_solver.cuda_getrf),
+    lu_p, partial(_lu_cpu_gpu_lowering, gpu_solver.cuda_getrf,
+                  platform='cuda'),
     platform='cuda')
 mlir.register_lowering(
-    lu_p, partial(_lu_cpu_gpu_lowering, gpu_solver.rocm_getrf),
+    lu_p, partial(_lu_cpu_gpu_lowering, gpu_solver.rocm_getrf,
+                  platform='rocm'),
     platform='rocm')
 
 mlir.register_lowering(lu_p, _lu_tpu_lowering_rule, platform='tpu')

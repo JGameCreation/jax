@@ -19,6 +19,7 @@ import jaxlib.mlir.ir as ir
 import jaxlib.mlir.dialects.stablehlo as hlo
 
 import numpy as np
+from typing import Tuple
 from jaxlib import xla_client
 
 from .hlo_helpers import custom_call
@@ -99,17 +100,20 @@ def trsm_hlo(dtype, alpha, a, b, left_side=False, lower=False, trans_a=False,
 
 # # ?getrf: LU decomposition
 
-def getrf_hlo(dtype, a):
+def getrf_hlo(dtype, a: ir.Value, *,
+              batch_size: ir.Value, m: ir.Value, n: ir.Value,
+              result_types: Tuple[ir.Type, ir.Type, ir.Type],
+              result_shapes: Tuple[ir.Value, ir.Value, ir.Value]):
+  # batch_size is the product of the batch dimensions
+  # m, m = a.shape[-1:]
   _initialize()
   dims = ir.RankedTensorType(a.type).shape
   assert len(dims) >= 2
-  m, n = dims[-2:]
   batch_dims = tuple(dims[:-2])
-  num_bd = len(batch_dims)
-  b = 1
-  for d in batch_dims:
-    b *= d
+  num_bd = len(dims) - 2
 
+  if all(d != ir.ShapedType.get_dynamic_size() for d in batch_dims):
+    result_shapes = None
   if dtype == np.float32:
     fn = b"lapack_sgetrf"
   elif dtype == np.float64:
@@ -123,15 +127,10 @@ def getrf_hlo(dtype, a):
 
   scalar_layout = []
   layout = (num_bd, num_bd + 1) + tuple(range(num_bd - 1, -1, -1))
-  i32_type = ir.IntegerType.get_signless(32)
   return custom_call(
       fn,
-      [
-        a.type,
-        ir.RankedTensorType.get(batch_dims + (min(m, n),), i32_type),
-        ir.RankedTensorType.get(batch_dims, i32_type),
-      ],
-      [_hlo_s32(int(b)), _hlo_s32(m), _hlo_s32(n), a],
+      result_types,
+      [batch_size, m, n, a],
       operand_layouts=[scalar_layout] * 3 + [layout],
       result_layouts=[
         layout,
@@ -139,6 +138,7 @@ def getrf_hlo(dtype, a):
         tuple(range(num_bd - 1, -1, -1)),
       ],
       operand_output_aliases={3: 0},
+      result_shapes=result_shapes,
   )
 
 
