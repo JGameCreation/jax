@@ -15,6 +15,7 @@
 import inspect
 import functools
 from functools import partial
+import logging
 import math
 from typing import cast, Any, Callable, List, Literal, Optional, Tuple, TypeVar, Union, overload
 import warnings
@@ -487,15 +488,22 @@ def eig_abstract_eval(operand, *, compute_left_eigenvectors,
 
 def _eig_cpu_lowering(ctx, operand, *, compute_left_eigenvectors,
                       compute_right_eigenvectors):
-  if any(not is_constant_shape(a.shape) for a in (ctx.avals_in + ctx.avals_out)):
-    raise NotImplementedError("Shape polymorphism for custom call is not implemented (eig); b/261671778")
   operand_aval, = ctx.avals_in
   out_aval = ctx.avals_out[0]
   batch_dims = operand_aval.shape[:-2]
-
-  w, vl, vr, info = lapack.geev_hlo(operand_aval.dtype, operand,
-                                    jobvl=compute_left_eigenvectors,
-                                    jobvr=compute_right_eigenvectors)
+  if jaxlib_version < (0, 4, 13):
+    w, vl, vr, info = lapack.geev_hlo(operand_aval.dtype, operand,
+                                      jobvl=compute_left_eigenvectors,
+                                      jobvr=compute_right_eigenvectors)
+  else:
+    n, m = operand_aval.shape[-2:]
+    assert m == n
+    op_shape_vals = mlir.eval_dynamic_shape_as_vals(ctx, operand_aval.shape)
+    logging.info(f"YYY types = {[o.type for o in op_shape_vals]}")
+    w, vl, vr, info = lapack.geev_hlo(operand_aval.dtype, operand,
+                                      input_shape_vals=op_shape_vals,
+                                      jobvl=compute_left_eigenvectors,
+                                      jobvr=compute_right_eigenvectors)
 
   ok = mlir.compare_hlo(
       info, mlir.full_like_aval(ctx, 0, ShapedArray(batch_dims, np.dtype(np.int32))),

@@ -695,6 +695,8 @@ _CUSTOM_CALL_TARGETS_GUARANTEED_STABLE = {
     "cusolver_syevj", "cusolver_syevd",
     # eigh on TPU
     "Eigh",
+    # eig on CPU
+    "lapack_sgeev",
     # qr on CPU
     "lapack_sgeqrf", "lapack_dgeqrf", "lapack_cgeqrf", "lapack_zgeqrf",
     "lapack_sorgqr", "lapack_dorgqr", "lapack_cungqr", "lapack_zungqr",

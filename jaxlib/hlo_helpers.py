@@ -19,6 +19,44 @@ import jaxlib.mlir.dialects.stablehlo as hlo
 import numpy as np
 
 
+def ir_type(dtype: np.dtype) -> ir.Type:
+  if dtype == np.int32:
+    return ir.IntegerType.get_signless(32)
+  elif dtype == np.int64:
+    return ir.IntegerType.get_signless(64)
+  else:
+    raise NotImplementedError(dtype)
+
+def ir_constant(x: np.ndarray) -> ir.Value:
+  assert isinstance(x, np.ndarray)
+  return hlo.ConstantOp(
+      ir.DenseElementsAttr.get(x, type=ir_type(x.dtype))).result
+
+def int_attr(x: int, dtype=np.dtype) -> ir.Attribute:
+  return ir.IntegerAttr.get(ir_type(dtype), x)
+
+def shape_dtype_to_ir_type(shape: Sequence[int], dtype: np.dtype) -> ir.Type:
+  return ir.RankedTensorType.get(shape, ir_type(dtype))
+
+def shape_tensor(sizes: Sequence[Union[int, ir.Value]]) -> ir.Value:
+  int1d = shape_dtype_to_ir_type((1,), np.int32)
+  i32_type = shape_dtype_to_ir_type((), np.int32)
+  def lower_dim(d):
+    if type(d) is int:
+      return ir_constant(np.array(d, dtype=np.int32))
+    else:
+      if d.type != i32_type:
+        d = hlo.ConvertOp(i32_type, d)
+      return hlo.ReshapeOp(int1d, d).result
+  ds = [lower_dim(sz) for sz in sizes]
+  if not ds:
+    return ir_constant(np.array([], np.int32))
+  elif len(ds) == 1:
+    return ds[0]
+  else:
+    return hlo.ConcatenateOp(ds, int_attr(0, np.int64)).result
+
+
 def custom_call(
     call_target_name: Union[str, bytes],
     out_types: Sequence[ir.Type],
